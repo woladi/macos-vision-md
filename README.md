@@ -135,6 +135,64 @@ Anything Apple Vision can read: JPEG, PNG, HEIC, HEIF, TIFF, GIF, BMP, WebP.
 
 ---
 
+## Evaluation & Quality Assurance
+
+The repository ships a full evaluation suite that measures conversion quality against
+the [opendataloader-bench](https://github.com/opendataloader-project/opendataloader-bench)
+dataset using two complementary metrics:
+
+| Metric | Description |
+|---|---|
+| **CER** (Character Error Rate) | Levenshtein distance / ground-truth length — measures raw text accuracy |
+| **LLM-as-a-judge** | An LLM scores 1–10 on text accuracy, structure (headings/tables/lists), and completeness |
+
+A file **passes** when its LLM score is ≥ 8.
+
+### Setup
+
+```bash
+# 1. Clone the benchmark dataset (one-time)
+npm run eval:setup
+
+# 2. Run the evaluation (Ollama must be running)
+npm run eval
+
+# 3. Print a formatted report of the latest run
+npm run eval:report
+```
+
+### Feedback loop — improve the prompt
+
+When files fail (score < 8), the `optimize-prompts` command analyses the failures
+and asks Claude to suggest concrete improvements to the system prompt in `src/prompt.ts`:
+
+```bash
+ANTHROPIC_API_KEY=sk-... npm run optimize-prompts
+```
+
+It outputs a diagnosis and a revised instruction string ready to drop into `buildPrompt()`.
+Apply the suggestions, then re-run `npm run eval` to verify the improvement.
+
+### Eval pipeline internals
+
+```
+eval/bench/pdfs/*.pdf
+  │
+  ▼  VisionScribe.toMarkdown()
+eval/predictions/{name}.md
+  │
+  ├─ computeCER(prediction, groundTruth)       → cer  (0–1)
+  └─ llmJudge(prediction, groundTruth)         → score (1–10)
+  │
+  ▼
+eval/reports/report-{timestamp}.json
+```
+
+The judge auto-selects its backend: **Claude** when `ANTHROPIC_API_KEY` is set,
+otherwise **Ollama/Mistral** for a fully local run.
+
+---
+
 ## License
 
 MIT © Adrian Wolczuk
