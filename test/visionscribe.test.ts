@@ -55,9 +55,9 @@ describe('groupByParagraph', () => {
 describe('buildPrompt', () => {
   it('includes the system instruction', () => {
     const prompt = buildPrompt([{ paragraphId: 0, y: 0.1, lines: ['Hello'], page: 0 }]);
-    expect(prompt).toContain('Markdown formatter');
-    expect(prompt).toContain('FORBIDDEN');
-    expect(prompt).toContain('CRITICAL CONSTRAINT');
+    expect(prompt).toContain('HIGH-FIDELITY DOCUMENT PARSER');
+    expect(prompt).toContain('DO NOT SUMMARIZE');
+    expect(prompt).toContain('1:1 content fidelity');
   });
 
   it('includes paragraph headers with y hint', () => {
@@ -82,7 +82,7 @@ describe('buildPrompt', () => {
 // ---------------------------------------------------------------------------
 
 const mockPing = vi.fn<() => Promise<void>>();
-const mockGenerate = vi.fn<() => Promise<string>>();
+const mockChat = vi.fn<() => Promise<string>>();
 const mockOcr = vi.fn<() => Promise<LayoutBlock[]>>();
 const mockInferLayout = vi.fn<() => LayoutBlock[]>();
 const mockSortBlocks = vi.fn<() => LayoutBlock[]>();
@@ -95,7 +95,7 @@ vi.mock('../src/ollama.js', () => ({
     }
   },
   ping: (...args: unknown[]) => mockPing(...args),
-  generate: (...args: unknown[]) => mockGenerate(...args),
+  chat: (...args: unknown[]) => mockChat(...args),
 }));
 
 vi.mock('macos-vision', () => ({
@@ -110,7 +110,7 @@ describe('VisionScribe', () => {
     mockOcr.mockResolvedValue([]);
     mockInferLayout.mockReturnValue([]);
     mockSortBlocks.mockReturnValue([]);
-    mockGenerate.mockResolvedValue('');
+    mockChat.mockResolvedValue('');
   });
 
   it('throws OllamaUnavailableError when Ollama is down', async () => {
@@ -129,10 +129,10 @@ describe('VisionScribe', () => {
     const scribe = new VisionScribe();
     const result = await scribe.toMarkdown('empty.png');
     expect(result).toBe('');
-    expect(mockGenerate).not.toHaveBeenCalled();
+    expect(mockChat).not.toHaveBeenCalled();
   });
 
-  it('calls generate with a prompt when text is found', async () => {
+  it('calls chat with system prompt and user content when text is found', async () => {
     mockPing.mockResolvedValue(undefined);
     const block: LayoutBlock = {
       kind: 'text', text: 'Hello', x: 0.1, y: 0.05,
@@ -141,16 +141,21 @@ describe('VisionScribe', () => {
     mockOcr.mockResolvedValue([block]);
     mockInferLayout.mockReturnValue([block]);
     mockSortBlocks.mockReturnValue([block]);
-    mockGenerate.mockResolvedValue('# Hello');
+    mockChat.mockResolvedValue('# Hello');
 
     const { VisionScribe } = await import('../src/index.js');
     const scribe = new VisionScribe({ model: 'mistral-nemo', ollamaUrl: 'http://localhost:11434' });
     const result = await scribe.toMarkdown('doc.png');
 
     expect(result).toBe('# Hello');
-    expect(mockGenerate).toHaveBeenCalledOnce();
-    const [opts, prompt] = mockGenerate.mock.calls[0] as [{ model: string; baseUrl: string }, string];
+    expect(mockChat).toHaveBeenCalledOnce();
+    const [opts, systemPrompt, userContent] = mockChat.mock.calls[0] as [
+      { model: string; baseUrl: string },
+      string,
+      string,
+    ];
     expect(opts.model).toBe('mistral-nemo');
-    expect(prompt).toContain('Hello');
+    expect(systemPrompt).toContain('DO NOT SUMMARIZE');
+    expect(userContent).toContain('Hello');
   });
 });
