@@ -17,7 +17,7 @@ Image / PDF
   │
   ▼
 Apple Vision OCR          ← macOS native, always accurate, zero hallucination
-  │  VisionBlock[]          PDFs are rasterized via sips before OCR
+  │  VisionBlock[]
   │  (text + bounding boxes)
   ▼
 Layout Inference          ← spatial grouping into lines + paragraphs
