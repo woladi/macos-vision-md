@@ -1,6 +1,6 @@
 # macos-vision-md
 
-Convert images and PDFs to structured Markdown using **Apple Vision OCR** + a **local Ollama/Mistral model** — fully offline, no cloud APIs, no subscriptions.
+Convert images and PDFs to structured Markdown using **Apple Vision OCR** + a **local Ollama model** — fully offline, no cloud APIs, no subscriptions.
 
 ```bash
 npm install macos-vision-md
@@ -18,33 +18,32 @@ Nothing is downloaded at runtime. Nothing leaves your machine except the local O
 
 ## How it works
 
-Most image-to-Markdown tools rely on a cloud vision API to do everything in one shot. This package takes a different approach — a two-stage hybrid pipeline that keeps OCR deterministic and local while using the LLM only for formatting:
+Most image-to-Markdown tools rely on a cloud vision API to do everything in one shot. This package takes a different approach — a multi-stage pipeline that keeps OCR deterministic and local while using the LLM only for formatting:
 
 ```
 Image / PDF
   │
   ▼
-Apple Vision OCR          ← macOS native, always accurate, zero hallucination
-  │  VisionBlock[]
-  │  (text + bounding boxes)
+Apple Vision OCR          ← macOS native, deterministic, zero hallucination
+  │  VisionBlock[] per page
   ▼
-Layout Inference          ← spatial grouping into lines + paragraphs
+Per-page Layout Inference ← each page processed independently (coordinates are page-local)
   │  paragraphId, lineId, y-coordinates
   ▼
-Prompt Builder            ← structured, grounded prompt (no invention possible)
-  │  "[Paragraph 0, y≈0.05]\nInvoice\n\n[Paragraph 1, y≈0.12]\n..."
+Chunker                   ← splits paragraphs into batches that fit the LLM output window
+  │  ParagraphGroup[][]
   ▼
-Ollama / Mistral          ← formats pre-extracted text into clean Markdown
-  │
+Ollama /api/chat          ← system prompt as role:"system", OCR text as role:"user"
+  │  temperature=0, top_p=1, num_predict=-1
   ▼
-Markdown string
+Markdown string           ← chunk results joined with blank lines
 ```
 
 ### Why this prevents hallucinations
 
-The LLM never sees the raw image — it only receives text that Apple Vision has already extracted. The prompt explicitly forbids the model from adding or paraphrasing content. It can only decide _how to format_ the words already on the page (headings, bullets, paragraphs).
+The LLM never sees the raw image — it only receives text that Apple Vision has already extracted. The system prompt instructs the model to act as a high-fidelity document parser and explicitly forbids summarising, paraphrasing, or adding content. OCR text is wrapped in `<ocr_source>` tags so the model cannot mistake it for a user asking a question.
 
-The `paragraphId` grouping (computed via spatial gap heuristics in `macos-vision`) ensures the model understands which OCR fragments belong together, so it never accidentally merges or splits paragraphs.
+Per-page processing ensures paragraph coordinates from different pages are never mixed, which would cause layout inference to produce incorrect groupings on multi-page PDFs.
 
 ---
 
@@ -58,43 +57,6 @@ The `paragraphId` grouping (computed via spatial gap heuristics in `macos-vision
    ollama pull mistral-nemo
    ```
 3. **Node.js ≥ 18**
-
----
-
-## CLI
-
-```bash
-# Install globally
-npm install -g macos-vision-md
-
-# Convert — writes invoice.md next to the source file
-macos-vision-md invoice.png
-
-# Convert PDF
-macos-vision-md scan.pdf
-
-# Write to a specific output file
-macos-vision-md scan.pdf -o notes.md
-
-# Print to stdout (pipeable)
-macos-vision-md receipt.jpg --stdout
-
-# Copy to clipboard
-macos-vision-md receipt.jpg --stdout | pbcopy
-
-# Use a different model or Ollama URL
-macos-vision-md document.png --model llama3.2 --ollama-url http://localhost:11434
-```
-
-### CLI options
-
-| Option | Description |
-|---|---|
-| `-o, --output <path>` | Write Markdown to the specified file |
-| `--stdout` | Print Markdown to stdout instead of creating a file |
-| `--model <name>` | Ollama model name (default: `mistral-nemo`) |
-| `--ollama-url <url>` | Ollama base URL (default: `http://localhost:11434`) |
-| `-h, --help` | Show help |
 
 ---
 
@@ -138,6 +100,7 @@ for (const file of files) {
 | `model` | `string` | `'mistral-nemo'` | Ollama model name |
 | `ollamaUrl` | `string` | `'http://localhost:11434'` | Base URL of the Ollama server |
 | `skipPing` | `boolean` | `false` | Skip per-call Ollama health check (useful in batch loops) |
+| `chunkSizeTokens` | `number` | `1800` | Max estimated output tokens per LLM chunk. Lower = more chunks (safer for small models); higher = fewer calls but risks hitting model output limits |
 
 ### `scribe.toMarkdown(imagePath)`
 
@@ -155,19 +118,29 @@ Extends `Error`. Thrown when the Ollama server cannot be reached. Check `error.m
 
 ## How the prompt is structured
 
-Each call to `toMarkdown` builds a prompt that looks like this:
+Each chunk is sent as a two-message chat request:
 
+**System message** (`role: "system"`) — hard constraints sent once per chunk:
 ```
-You are a precise Markdown formatter. The text below was extracted from
-an image using Apple Vision OCR and is already grouped into paragraphs
-in reading order.
+ACT AS A HIGH-FIDELITY DOCUMENT PARSER. Your only goal is to reconstruct
+the provided OCR data into a structured Markdown document. NEVER skip text.
+NEVER summarize. Content must be 100% identical to the source.
 
-RULES:
-1. Do NOT add, invent, or paraphrase any words. Use only the text provided.
-2. Use # / ## / ### only for paragraphs that look like titles or headings …
+DO NOT SUMMARIZE.
+Transcribe every single word from the provided OCR data.
+Maintain 1:1 content fidelity. If the source has 5 paragraphs, the output
+must have 5 paragraphs.
 …
+```
 
----
+**User message** (`role: "user"`) — OCR content wrapped in source tags:
+```
+Convert the OCR source below into Markdown.
+Reproduce EVERY word EXACTLY. Do not respond, explain, or ask questions.
+
+<ocr_source>
+
+[Page 1]
 
 [Paragraph 0, y≈0.04]
 Quarterly Report Q3 2024
@@ -176,86 +149,27 @@ Quarterly Report Q3 2024
 Revenue increased by 12% compared to the previous quarter.
 All product lines contributed to growth.
 
-[Paragraph 2, y≈0.25]
+[Page 2]
+
+[Paragraph 5, y≈0.08]
 Key Metrics
 …
+</ocr_source>
 ```
 
-The `y≈` value is the normalised vertical position (0 = top of image, 1 = bottom). The model uses it as a spatial cue — a short, isolated paragraph near the top is likely a title.
+The `y≈` value is the normalised vertical position (0 = top of page, 1 = bottom). It helps the model distinguish titles (short text near the top) from body paragraphs. `[Page N]` separators appear only for multi-page documents.
+
+The Ollama request uses `temperature: 0` and `top_p: 1` to make token selection deterministic, and `num_predict: -1` to disable output truncation.
 
 ---
 
-## Evaluation & Quality Assurance
+## Known limitations
 
-The repository ships a full evaluation suite that measures conversion quality against
-the [opendataloader-bench](https://github.com/opendataloader-project/opendataloader-bench)
-dataset using two complementary metrics:
+- **Local model fidelity**: Small local models (mistral-nemo, gemma) may occasionally summarise or paraphrase content on long or information-dense documents instead of transcribing word-for-word. The pipeline uses `temperature: 0` and explicit fidelity instructions to minimise this, but it is an inherent limitation of small LLMs. Larger models (e.g. `llama3.1:70b`, `qwen2.5:32b`) produce significantly better fidelity.
 
-| Metric | Description |
-|---|---|
-| **CER** (Character Error Rate) | Levenshtein distance / ground-truth length — measures raw text accuracy |
-| **LLM-as-a-judge** | An LLM scores 1–10 on text accuracy, structure (headings/tables/lists), and completeness |
+- **Tables**: Multi-column table layouts are partially supported. OCR reads cells in reading order but the LLM may not always reconstruct correct Markdown table syntax.
 
-A file **passes** when its LLM score is ≥ 8.
-
-### Baseline results (v0.1.0)
-
-Tested on 10 files from opendataloader-bench with `mistral-nemo`:
-
-```
-Passed (≥8):    6 / 10
-Avg CER:        26.6%
-Avg LLM score:  7.4 / 10
-```
-
-### Setup
-
-```bash
-# 1. Clone the benchmark dataset (one-time)
-npm run eval:setup
-
-# 2. Run all 200 files
-npm run eval
-
-# 3. Run only the first 10 (quick sanity check)
-npm run eval:quick
-
-# 4. Resume a previously interrupted run
-npm run eval:resume
-
-# 5. Print a formatted report of the latest run
-npm run eval:report
-```
-
-### Feedback loop — improve the prompt
-
-When files fail (score < 8), the `optimize-prompts` command analyses the failures
-and asks Claude to suggest concrete improvements to the system prompt in `src/prompt.ts`:
-
-```bash
-ANTHROPIC_API_KEY=sk-... npm run optimize-prompts
-```
-
-It outputs a diagnosis and a revised instruction string ready to drop into `buildPrompt()`.
-Apply the suggestions, then re-run `npm run eval` to verify the improvement.
-
-### Eval pipeline internals
-
-```
-eval/bench/pdfs/*.pdf
-  │
-  ▼  VisionScribe.toMarkdown()
-eval/predictions/{name}.md
-  │
-  ├─ computeCER(prediction, groundTruth)    → cer  (0–1)
-  └─ llmJudge(prediction, groundTruth)      → score (1–10)
-  │
-  ▼
-eval/reports/report-{timestamp}.json
-```
-
-The judge auto-selects its backend: **Claude** when `ANTHROPIC_API_KEY` is set,
-otherwise **Ollama/Mistral** for a fully local run.
+- **Images / charts**: Non-textual content (photos, diagrams, charts) is ignored — only text blocks extracted by Apple Vision are processed.
 
 ---
 

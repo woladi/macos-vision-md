@@ -1,7 +1,8 @@
 import { ocr, inferLayout, sortBlocksByReadingOrder } from 'macos-vision';
 import type { VisionBlock } from 'macos-vision';
-import { ping, generate, OllamaUnavailableError } from './ollama.js';
-import { groupByParagraph, buildPrompt } from './prompt.js';
+import { ping, chat, OllamaUnavailableError } from './ollama.js';
+import { groupByParagraph, buildPrompt, buildUserContent, SYSTEM_PROMPT } from './prompt.js';
+import { chunkParagraphs } from './chunker.js';
 import type { ParagraphGroup } from './prompt.js';
 
 export { OllamaUnavailableError } from './ollama.js';
@@ -24,6 +25,14 @@ export interface VisionScribeOptions {
    * @default false
    */
   skipPing?: boolean;
+  /**
+   * Maximum estimated output tokens per LLM chunk.
+   * Paragraphs are batched so that no single generate() call is expected
+   * to produce more than this many tokens. Lower values mean more (faster)
+   * chunks; higher values risk hitting the model's output token limit.
+   * @default 1800
+   */
+  chunkSizeTokens?: number;
 }
 
 /**
@@ -52,8 +61,9 @@ function groupBlocksByPage(blocks: VisionBlock[]): Map<number, VisionBlock[]> {
  *    PDFs are automatically rasterized page-by-page via `sips`.
  * 2. **Layout inference** — groups blocks by `paragraphId` per page using spatial
  *    heuristics (each page processed independently to avoid coordinate mixing).
- * 3. **Local LLM (Ollama/Mistral)** — formats the pre-extracted paragraphs into
- *    clean Markdown without hallucinating new content.
+ * 3. **Chunking** — paragraphs are batched to stay within the LLM output token budget.
+ * 4. **Local LLM (Ollama/Mistral)** — formats each chunk into clean Markdown without
+ *    hallucinating new content.
  *
  * @example
  * ```ts
@@ -66,11 +76,13 @@ export class VisionScribe {
   private readonly model: string;
   private readonly ollamaUrl: string;
   private readonly skipPing: boolean;
+  private readonly chunkSizeTokens: number;
 
   constructor(options: VisionScribeOptions = {}) {
     this.model = options.model ?? 'mistral-nemo';
     this.ollamaUrl = options.ollamaUrl ?? 'http://localhost:11434';
     this.skipPing = options.skipPing ?? false;
+    this.chunkSizeTokens = options.chunkSizeTokens ?? 1800;
   }
 
   /**
@@ -104,13 +116,22 @@ export class VisionScribe {
       return '';
     }
 
-    // 5. Build the grounded prompt and send to the local LLM.
-    const prompt = buildPrompt(allParagraphs);
-    const markdown = await generate(
-      { baseUrl: this.ollamaUrl, model: this.model },
-      prompt,
-    );
+    // 5. Split paragraphs into chunks that fit within the output token budget.
+    const chunks = chunkParagraphs(allParagraphs, this.chunkSizeTokens);
 
-    return markdown;
+    // 6. Send each chunk to the LLM sequentially and join the results.
+    //    System prompt goes as role:"system", OCR text as role:"user" — this
+    //    prevents the model from treating instructions as content to summarise.
+    const parts: string[] = [];
+    for (const chunk of chunks) {
+      const part = await chat(
+        { baseUrl: this.ollamaUrl, model: this.model },
+        SYSTEM_PROMPT,
+        buildUserContent(chunk),
+      );
+      parts.push(part);
+    }
+
+    return parts.join('\n\n');
   }
 }

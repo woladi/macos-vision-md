@@ -9,18 +9,15 @@ export interface ParagraphGroup {
   /** Average y-coordinate of the first line — used as a spatial hint. */
   y: number;
   lines: string[];
-  /** 0-based page index (for multi-page PDFs). */
+  /** Zero-based page index (always 0 for single images). */
   page: number;
 }
 
 /**
  * Group sorted layout blocks by paragraphId into ParagraphGroup objects.
  * Non-text blocks (faces, barcodes, etc.) are ignored.
- *
- * @param blocks  Blocks from a SINGLE page only (coordinates are page-local).
- * @param page    0-based page index to attach to every resulting group.
  */
-export function groupByParagraph(blocks: LayoutBlock[], page = 0): ParagraphGroup[] {
+export function groupByParagraph(blocks: LayoutBlock[], pageIndex = 0): ParagraphGroup[] {
   const map = new Map<number, { y: number; lines: Map<number, string[]> }>();
 
   for (const block of blocks) {
@@ -38,71 +35,77 @@ export function groupByParagraph(blocks: LayoutBlock[], page = 0): ParagraphGrou
 
   const groups: ParagraphGroup[] = [];
   for (const [paragraphId, { y, lines }] of map) {
+    // Join tokens within each line, then collect lines in order
     const lineStrings = [...lines.entries()]
       .sort(([a], [b]) => a - b)
       .map(([, tokens]) => tokens.join(' '));
 
-    groups.push({ paragraphId, y, lines: lineStrings, page });
+    groups.push({ paragraphId, y, lines: lineStrings, page: pageIndex });
   }
 
   return groups;
 }
 
 /**
- * Build the full prompt string that will be sent to the LLM.
- *
- * Design goals:
- * - Ground the model strictly on pre-extracted OCR text — no hallucination possible.
- * - Provide spatial context (y-coordinate, page) so the model can infer headings.
- * - Produce clean Markdown without any fabricated content.
+ * The system prompt sent as `role: "system"` in every chat request.
+ * Kept separate from user content so the model treats it as hard constraints,
+ * not as text to be summarised or analysed.
  */
-export function buildPrompt(paragraphs: ParagraphGroup[]): string {
-  const systemInstruction = `You are a Markdown formatter. Your input is raw OCR text extracted \
-from a document using Apple Vision. The paragraphs below are the COMPLETE and ONLY source of truth.
+export const SYSTEM_PROMPT = `ACT AS A HIGH-FIDELITY DOCUMENT PARSER. \
+Your only goal is to reconstruct the provided OCR data into a structured \
+Markdown document. NEVER skip text. NEVER summarize. \
+Content must be 100% identical to the source.
 
-CRITICAL CONSTRAINT:
-You are a copy-editor, not a writer. Your ONLY job is to apply Markdown formatting \
-symbols (# ## ### - *) to the words already present in the input. Nothing else.
+DO NOT SUMMARIZE.
+Transcribe every single word from the provided OCR data.
+Maintain 1:1 content fidelity. If the source has 5 paragraphs, the output must have 5 paragraphs.
 
-FORBIDDEN — doing any of these will produce a wrong result:
-- Adding ANY word, phrase, or sentence not present in the paragraphs below
-- Using your background knowledge to fill gaps, correct text, or add context
-- Paraphrasing, summarising, or expanding any content
-- Adding nicknames, dates, facts, titles, or descriptions from memory
-- Inventing section headings that do not appear verbatim in the input
+STRICT OUTPUT: Output ONLY the Markdown representation. \
+No preamble, no "Summary of key events", no "Here is the result".
 
-ALLOWED:
-- Placing # / ## / ### before a line that is clearly a heading (short, isolated, low y value)
-- Placing - before items that are clearly list entries in the source text
-- Joining lines within the same paragraph into flowing prose
-- Preserving blank lines between paragraphs
-- Preserving [Page N] boundaries as a Markdown horizontal rule (---)
+FORMATTING RULES:
+- Add # / ## / ### before lines that are clearly headings or titles
+- Add - before items that are clearly list entries
+- Join lines within the same paragraph into flowing prose
+- Preserve blank lines between paragraphs
+- Do NOT wrap output in code fences`;
 
-Return ONLY the Markdown. No preamble, no commentary, no code fences.`;
+/**
+ * Build the user-facing content block from a list of paragraphs.
+ * This is the OCR text that the model will format — no instructions included.
+ * Sent as `role: "user"` in the chat request.
+ */
+export function buildUserContent(paragraphs: ParagraphGroup[]): string {
+  const pageNumbers = [...new Set(paragraphs.map(p => p.page))].sort((a, b) => a - b);
+  const multiPage = pageNumbers.length > 1;
 
-  // Group paragraphs by page, then render with page separators
-  const pageGroups = new Map<number, ParagraphGroup[]>();
-  for (const p of paragraphs) {
-    const existing = pageGroups.get(p.page) ?? [];
-    existing.push(p);
-    pageGroups.set(p.page, existing);
+  const blocks: string[] = [];
+
+  for (const pageNum of pageNumbers) {
+    if (multiPage) {
+      blocks.push(`[Page ${pageNum + 1}]`);
+    }
+
+    const pageParagraphs = paragraphs.filter(p => p.page === pageNum);
+    for (const { paragraphId, y, lines } of pageParagraphs) {
+      const yHint = y.toFixed(2);
+      const header = `[Paragraph ${paragraphId}, y≈${yHint}]`;
+      blocks.push(`${header}\n${lines.join('\n')}`);
+    }
   }
 
-  const pages = [...pageGroups.entries()].sort(([a], [b]) => a - b);
-  const multiPage = pages.length > 1;
+  const task =
+    'Convert the OCR source below into Markdown. ' +
+    'Reproduce EVERY word EXACTLY. Do not respond, explain, or ask questions.\n\n' +
+    '<ocr_source>';
 
-  const body = pages
-    .map(([pageIndex, groups]) => {
-      const pageHeader = multiPage ? `[Page ${pageIndex + 1}]\n\n` : '';
-      const blocks = groups
-        .map(({ paragraphId, y, lines }) => {
-          const yHint = y.toFixed(2);
-          return `[Paragraph ${paragraphId}, y≈${yHint}]\n${lines.join('\n')}`;
-        })
-        .join('\n\n');
-      return `${pageHeader}${blocks}`;
-    })
-    .join('\n\n---\n\n');
+  return `${task}\n\n${blocks.join('\n\n')}\n</ocr_source>`;
+}
 
-  return `${systemInstruction}\n\n---\n\n${body}`;
+/**
+ * Build the combined string used for token estimation in the chunker.
+ * Mirrors what will be sent to the model (system + user content).
+ */
+export function buildPrompt(paragraphs: ParagraphGroup[]): string {
+  return `${SYSTEM_PROMPT}\n\n${buildUserContent(paragraphs)}`;
 }
