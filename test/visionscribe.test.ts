@@ -54,21 +54,22 @@ describe('groupByParagraph', () => {
 
 describe('buildPrompt', () => {
   it('includes the system instruction', () => {
-    const prompt = buildPrompt([{ paragraphId: 0, y: 0.1, lines: ['Hello'] }]);
+    const prompt = buildPrompt([{ paragraphId: 0, y: 0.1, lines: ['Hello'], page: 0 }]);
     expect(prompt).toContain('Markdown formatter');
-    expect(prompt).toContain('Do NOT add');
+    expect(prompt).toContain('FORBIDDEN');
+    expect(prompt).toContain('CRITICAL CONSTRAINT');
   });
 
   it('includes paragraph headers with y hint', () => {
-    const prompt = buildPrompt([{ paragraphId: 2, y: 0.123, lines: ['Test line'] }]);
+    const prompt = buildPrompt([{ paragraphId: 2, y: 0.123, lines: ['Test line'], page: 0 }]);
     expect(prompt).toContain('[Paragraph 2, y≈0.12]');
     expect(prompt).toContain('Test line');
   });
 
   it('separates multiple paragraphs with blank lines', () => {
     const prompt = buildPrompt([
-      { paragraphId: 0, y: 0.05, lines: ['First'] },
-      { paragraphId: 1, y: 0.20, lines: ['Second'] },
+      { paragraphId: 0, y: 0.05, lines: ['First'], page: 0 },
+      { paragraphId: 1, y: 0.20, lines: ['Second'], page: 0 },
     ]);
     expect(prompt).toContain('First');
     expect(prompt).toContain('Second');
