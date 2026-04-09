@@ -1,6 +1,6 @@
 # macos-vision-md
 
-Convert images to structured Markdown using **Apple Vision OCR** + a **local Ollama/Mistral model** — fully offline, no cloud APIs, no subscriptions.
+Convert images and PDFs to structured Markdown using **Apple Vision OCR** + a **local Ollama/Mistral model** — fully offline, no cloud APIs, no subscriptions.
 
 ```bash
 npm install macos-vision-md
@@ -13,11 +13,11 @@ npm install macos-vision-md
 Most image-to-Markdown tools rely on a cloud vision API to do everything in one shot. This package takes a different approach — a two-stage hybrid pipeline that keeps OCR deterministic and local while using the LLM only for formatting:
 
 ```
-Image
+Image / PDF
   │
   ▼
 Apple Vision OCR          ← macOS native, always accurate, zero hallucination
-  │  VisionBlock[]
+  │  VisionBlock[]          PDFs are rasterized via sips before OCR
   │  (text + bounding boxes)
   ▼
 Layout Inference          ← spatial grouping into lines + paragraphs
@@ -53,7 +53,44 @@ The `paragraphId` grouping (computed via spatial gap heuristics in `macos-vision
 
 ---
 
-## Quick start
+## CLI
+
+```bash
+# Install globally
+npm install -g macos-vision-md
+
+# Convert — writes invoice.md next to the source file
+macos-vision-md invoice.png
+
+# Convert PDF
+macos-vision-md scan.pdf
+
+# Write to a specific output file
+macos-vision-md scan.pdf -o notes.md
+
+# Print to stdout (pipeable)
+macos-vision-md receipt.jpg --stdout
+
+# Copy to clipboard
+macos-vision-md receipt.jpg --stdout | pbcopy
+
+# Use a different model or Ollama URL
+macos-vision-md document.png --model llama3.2 --ollama-url http://localhost:11434
+```
+
+### CLI options
+
+| Option | Description |
+|---|---|
+| `-o, --output <path>` | Write Markdown to the specified file |
+| `--stdout` | Print Markdown to stdout instead of creating a file |
+| `--model <name>` | Ollama model name (default: `mistral-nemo`) |
+| `--ollama-url <url>` | Ollama base URL (default: `http://localhost:11434`) |
+| `-h, --help` | Show help |
+
+---
+
+## Programmatic API
 
 ```ts
 import { VisionScribe } from 'macos-vision-md';
@@ -63,7 +100,7 @@ const markdown = await scribe.toMarkdown('receipt.png');
 console.log(markdown);
 ```
 
-Custom model or Ollama URL:
+Custom options:
 
 ```ts
 const scribe = new VisionScribe({
@@ -72,9 +109,19 @@ const scribe = new VisionScribe({
 });
 ```
 
----
+Batch processing (ping Ollama once, skip per-call health checks):
 
-## API
+```ts
+const scribe = new VisionScribe({ skipPing: true });
+
+// Verify Ollama once upfront
+import { ping } from 'macos-vision-md/ollama';
+await ping('http://localhost:11434');
+
+for (const file of files) {
+  const md = await scribe.toMarkdown(file);
+}
+```
 
 ### `new VisionScribe(options?)`
 
@@ -82,18 +129,19 @@ const scribe = new VisionScribe({
 |---|---|---|---|
 | `model` | `string` | `'mistral-nemo'` | Ollama model name |
 | `ollamaUrl` | `string` | `'http://localhost:11434'` | Base URL of the Ollama server |
+| `skipPing` | `boolean` | `false` | Skip per-call Ollama health check (useful in batch loops) |
 
 ### `scribe.toMarkdown(imagePath)`
 
-Converts the image at `imagePath` to a Markdown string.
+Converts the image or PDF at `imagePath` to a Markdown string.
 
-- Accepts any image format supported by Apple Vision: PNG, JPEG, HEIC, PDF page, etc.
-- Returns an empty string `''` if no text is detected in the image.
-- Throws `OllamaUnavailableError` if the Ollama server is not reachable before OCR is even attempted (fail-fast).
+- Accepts PNG, JPEG, HEIC, HEIF, TIFF, GIF, BMP, WebP and **PDF**
+- Returns an empty string `''` if no text is detected
+- Throws `OllamaUnavailableError` if the Ollama server is not reachable (unless `skipPing: true`)
 
 ### `OllamaUnavailableError`
 
-Extends `Error`. Thrown when the Ollama server cannot be reached. Check `error.message` for the URL and instructions.
+Extends `Error`. Thrown when the Ollama server cannot be reached. Check `error.message` for the URL and troubleshooting instructions.
 
 ---
 
@@ -129,12 +177,6 @@ The `y≈` value is the normalised vertical position (0 = top of image, 1 = bott
 
 ---
 
-## Supported image formats
-
-Anything Apple Vision can read: JPEG, PNG, HEIC, HEIF, TIFF, GIF, BMP, WebP.
-
----
-
 ## Evaluation & Quality Assurance
 
 The repository ships a full evaluation suite that measures conversion quality against
@@ -148,16 +190,32 @@ dataset using two complementary metrics:
 
 A file **passes** when its LLM score is ≥ 8.
 
+### Baseline results (v0.1.0)
+
+Tested on 10 files from opendataloader-bench with `mistral-nemo`:
+
+```
+Passed (≥8):    6 / 10
+Avg CER:        26.6%
+Avg LLM score:  7.4 / 10
+```
+
 ### Setup
 
 ```bash
 # 1. Clone the benchmark dataset (one-time)
 npm run eval:setup
 
-# 2. Run the evaluation (Ollama must be running)
+# 2. Run all 200 files
 npm run eval
 
-# 3. Print a formatted report of the latest run
+# 3. Run only the first 10 (quick sanity check)
+npm run eval:quick
+
+# 4. Resume a previously interrupted run
+npm run eval:resume
+
+# 5. Print a formatted report of the latest run
 npm run eval:report
 ```
 
@@ -181,8 +239,8 @@ eval/bench/pdfs/*.pdf
   ▼  VisionScribe.toMarkdown()
 eval/predictions/{name}.md
   │
-  ├─ computeCER(prediction, groundTruth)       → cer  (0–1)
-  └─ llmJudge(prediction, groundTruth)         → score (1–10)
+  ├─ computeCER(prediction, groundTruth)    → cer  (0–1)
+  └─ llmJudge(prediction, groundTruth)      → score (1–10)
   │
   ▼
 eval/reports/report-{timestamp}.json
