@@ -16,6 +16,12 @@ export interface VisionScribeOptions {
    * @default 'http://localhost:11434'
    */
   ollamaUrl?: string;
+  /**
+   * Skip the Ollama reachability check before each call.
+   * Useful in batch/eval contexts where you ping once upfront.
+   * @default false
+   */
+  skipPing?: boolean;
 }
 
 /**
@@ -35,10 +41,12 @@ export interface VisionScribeOptions {
 export class VisionScribe {
   private readonly model: string;
   private readonly ollamaUrl: string;
+  private readonly skipPing: boolean;
 
   constructor(options: VisionScribeOptions = {}) {
     this.model = options.model ?? 'mistral-nemo';
     this.ollamaUrl = options.ollamaUrl ?? 'http://localhost:11434';
+    this.skipPing = options.skipPing ?? false;
   }
 
   /**
@@ -50,7 +58,7 @@ export class VisionScribe {
    */
   async toMarkdown(imagePath: string): Promise<string> {
     // 1. Ensure Ollama is reachable before doing expensive OCR work.
-    await ping(this.ollamaUrl);
+    if (!this.skipPing) await ping(this.ollamaUrl);
 
     // 2. Extract raw OCR blocks via Apple Vision.
     const rawBlocks = await ocr(imagePath, { format: 'blocks' });

@@ -3,7 +3,9 @@
  * Evaluation runner for macos-vision-md.
  *
  * Usage:
- *   npm run eval
+ *   npm run eval                        # run all files
+ *   npm run eval -- --limit 20          # run first 20 files only
+ *   npm run eval -- --resume            # skip files already in predictions/
  *   ANTHROPIC_API_KEY=sk-... npm run eval
  *
  * Prerequisites:
@@ -15,13 +17,15 @@ import { readdir, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { VisionScribe } from '../src/index.js';
+import { ping } from '../src/ollama.js';
 import { computeCER, llmJudge } from './metrics.js';
 
 const ROOT = new URL('..', import.meta.url).pathname;
-const BENCH_PDFS = path.join(ROOT, 'eval/bench/pdfs');
-const BENCH_GT = path.join(ROOT, 'eval/bench/ground-truth');
+const BENCH_PDFS    = path.join(ROOT, 'eval/bench/pdfs');
+const BENCH_GT      = path.join(ROOT, 'eval/bench/ground-truth/markdown');
 const PREDICTIONS_DIR = path.join(ROOT, 'eval/predictions');
-const REPORTS_DIR = path.join(ROOT, 'eval/reports');
+const REPORTS_DIR   = path.join(ROOT, 'eval/reports');
+const OLLAMA_URL    = process.env['OLLAMA_URL'] ?? 'http://localhost:11434';
 
 export interface EvalResult {
   file: string;
@@ -32,34 +36,73 @@ export interface EvalResult {
   error?: string;
 }
 
+function parseArgs(): { limit?: number; resume: boolean } {
+  const args = process.argv.slice(2);
+  const limitIdx = args.indexOf('--limit');
+  const limit = limitIdx !== -1 ? parseInt(args[limitIdx + 1] ?? '', 10) : undefined;
+  const resume = args.includes('--resume');
+  return { limit: isNaN(limit!) ? undefined : limit, resume };
+}
+
 async function run(): Promise<void> {
-  // Sanity checks
+  const { limit, resume } = parseArgs();
+
   if (!existsSync(BENCH_PDFS)) {
-    console.error(
-      '✗ Benchmark not found. Run `npm run eval:setup` first to clone the dataset.',
-    );
+    console.error('✗ Benchmark not found. Run `npm run eval:setup` first.');
     process.exit(1);
   }
 
   await mkdir(PREDICTIONS_DIR, { recursive: true });
   await mkdir(REPORTS_DIR, { recursive: true });
 
-  const scribe = new VisionScribe();
-  const pdfFiles = (await readdir(BENCH_PDFS)).filter(f => f.endsWith('.pdf'));
+  let pdfFiles = (await readdir(BENCH_PDFS))
+    .filter(f => f.endsWith('.pdf'))
+    .sort();
+
+  if (limit) pdfFiles = pdfFiles.slice(0, limit);
 
   if (pdfFiles.length === 0) {
     console.error('✗ No PDF files found in eval/bench/pdfs/');
     process.exit(1);
   }
 
-  console.log(`\nEvaluating ${pdfFiles.length} file(s)...\n`);
+  // Resume: skip files that already have a prediction written
+  const toProcess = resume
+    ? pdfFiles.filter(f => {
+        const stem = path.basename(f, '.pdf');
+        return !existsSync(path.join(PREDICTIONS_DIR, `${stem}.md`));
+      })
+    : pdfFiles;
+
+  const skipped = pdfFiles.length - toProcess.length;
+
+  console.log(`\nEvaluating ${toProcess.length} file(s)${limit ? ` (limit: ${limit})` : ''}${resume && skipped ? ` — skipping ${skipped} already predicted` : ''}...\n`);
+
+  if (toProcess.length === 0) {
+    console.log('All files already predicted. Run without --resume to re-evaluate.\n');
+    process.exit(0);
+  }
+
+  // Ping Ollama once before the loop (unless using Claude as judge only)
+  const usingOllamaForOCR = true; // VisionScribe always needs Ollama for formatting
+  if (usingOllamaForOCR) {
+    try {
+      await ping(OLLAMA_URL);
+    } catch {
+      console.error(`✗ Ollama not reachable at ${OLLAMA_URL}. Make sure it's running.`);
+      process.exit(1);
+    }
+  }
+
+  // skipPing=true: we already verified Ollama above — no need to re-check per file
+  const scribe = new VisionScribe({ ollamaUrl: OLLAMA_URL, skipPing: true });
 
   const results: EvalResult[] = [];
 
-  for (const filename of pdfFiles) {
+  for (const filename of toProcess) {
     const stem = path.basename(filename, '.pdf');
     const pdfPath = path.join(BENCH_PDFS, filename);
-    const gtPath = path.join(BENCH_GT, `${stem}.md`);
+    const gtPath  = path.join(BENCH_GT, `${stem}.md`);
     process.stdout.write(`  ${filename} … `);
 
     let prediction = '';
@@ -75,7 +118,6 @@ async function run(): Promise<void> {
       continue;
     }
 
-    // Load ground truth (skip LLM judge if missing)
     if (!existsSync(gtPath)) {
       process.stdout.write('no ground-truth, skipping metrics\n');
       results.push({ file: filename, cer: 0, llmScore: 0, llmReason: 'no ground-truth', passed: false });
@@ -84,6 +126,13 @@ async function run(): Promise<void> {
 
     const groundTruth = await readFile(gtPath, 'utf8');
     const cer = computeCER(prediction, groundTruth);
+
+    // Skip LLM judge for empty predictions — models hallucinate high scores on empty input
+    if (!prediction.trim()) {
+      process.stdout.write('✗  empty prediction\n');
+      results.push({ file: filename, cer, llmScore: 0, llmReason: 'empty prediction (OCR returned no text)', passed: false });
+      continue;
+    }
 
     let llmScore = 0;
     let llmReason = '';
@@ -107,22 +156,22 @@ async function run(): Promise<void> {
   const reportPath = path.join(REPORTS_DIR, `report-${timestamp}.json`);
   await writeFile(reportPath, JSON.stringify(results, null, 2), 'utf8');
 
-  // Print summary
+  // Summary
   const evaluated = results.filter(r => r.llmScore > 0);
-  const passed = results.filter(r => r.passed).length;
-  const avgCER = evaluated.length
-    ? evaluated.reduce((s, r) => s + r.cer, 0) / evaluated.length
-    : 0;
-  const avgScore = evaluated.length
-    ? evaluated.reduce((s, r) => s + r.llmScore, 0) / evaluated.length
-    : 0;
+  const passed    = results.filter(r => r.passed).length;
+  const errors    = results.filter(r => r.error).length;
+  const empty     = results.filter(r => r.llmReason === 'empty prediction (OCR returned no text)').length;
+  const avgCER    = evaluated.length ? evaluated.reduce((s, r) => s + r.cer, 0) / evaluated.length : 0;
+  const avgScore  = evaluated.length ? evaluated.reduce((s, r) => s + r.llmScore, 0) / evaluated.length : 0;
 
   console.log('\n────────────────────────────────');
-  console.log(`  Total files:  ${results.length}`);
-  console.log(`  Passed (≥8):  ${passed} / ${results.length}`);
-  console.log(`  Avg CER:      ${(avgCER * 100).toFixed(1)}%`);
+  console.log(`  Total files:   ${results.length}`);
+  console.log(`  Passed (≥8):   ${passed} / ${results.length}`);
+  if (empty)  console.log(`  Empty OCR:     ${empty}`);
+  if (errors) console.log(`  Errors:        ${errors}`);
+  console.log(`  Avg CER:       ${(avgCER * 100).toFixed(1)}%`);
   console.log(`  Avg LLM score: ${avgScore.toFixed(1)} / 10`);
-  console.log(`\n  Report saved: ${reportPath}`);
+  console.log(`\n  Report: ${reportPath}`);
   console.log('────────────────────────────────\n');
 }
 

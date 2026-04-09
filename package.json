@@ -29,6 +29,8 @@
     "release:beta": "release-it --preRelease=beta",
     "eval:setup": "git clone https://github.com/opendataloader-project/opendataloader-bench eval/bench || echo 'bench already cloned'",
     "eval": "tsx eval/eval.ts",
+    "eval:resume": "tsx eval/eval.ts --resume",
+    "eval:quick": "tsx eval/eval.ts --limit 10",
     "eval:report": "tsx eval/report.ts",
     "optimize-prompts": "tsx eval/optimize-prompts.ts"
   },
@@ -45,7 +47,9 @@
     "offline",
     "native"
   ],
-  "os": ["darwin"],
+  "os": [
+    "darwin"
+  ],
   "engines": {
     "node": ">=18.0.0"
   },
@@ -65,7 +69,7 @@
     "eslint-config-prettier": "^10.1.8",
     "husky": "^9.1.7",
     "lint-staged": "^16.4.0",
-    "macos-vision": "^1.0.3",
+    "macos-vision": "^1.2.0",
     "prettier": "^3.8.1",
     "release-it": "^19.2.4",
     "tsx": "^4.19.0",

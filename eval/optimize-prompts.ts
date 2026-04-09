@@ -18,7 +18,7 @@ import type { EvalResult } from './eval.js';
 const ROOT = new URL('..', import.meta.url).pathname;
 const REPORTS_DIR  = path.join(ROOT, 'eval/reports');
 const PREDICTIONS_DIR = path.join(ROOT, 'eval/predictions');
-const BENCH_GT     = path.join(ROOT, 'eval/bench/ground-truth');
+const BENCH_GT     = path.join(ROOT, 'eval/bench/ground-truth/markdown');
 const PROMPT_FILE  = path.join(ROOT, 'src/prompt.ts');
 
 async function latestReport(): Promise<EvalResult[]> {
