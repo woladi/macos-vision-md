@@ -6,6 +6,14 @@ Convert images and PDFs to structured Markdown using **Apple Vision OCR** + a **
 npm install macos-vision-md
 ```
 
+## Zero runtime dependencies
+
+`macos-vision-md` has no npm runtime dependencies. It uses:
+- [`macos-vision`](https://github.com/woladi/macos-vision) (peer dependency — Apple Vision OCR)
+- Node.js built-in `fetch` for Ollama communication (Node 18+)
+
+Nothing is downloaded at runtime. Nothing leaves your machine except the local Ollama request.
+
 ---
 
 ## How it works

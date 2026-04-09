@@ -1,5 +1,3 @@
-import axios from 'axios';
-
 export interface OllamaOptions {
   /** Base URL of the Ollama server. Default: `http://localhost:11434` */
   baseUrl: string;
@@ -13,7 +11,7 @@ export interface OllamaOptions {
  */
 export async function ping(baseUrl: string): Promise<void> {
   try {
-    await axios.get(`${baseUrl}/api/tags`, { timeout: 3000 });
+    await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(3_000) });
   } catch {
     throw new OllamaUnavailableError(baseUrl);
   }
@@ -27,12 +25,19 @@ export async function generate(
   opts: OllamaOptions,
   prompt: string,
 ): Promise<string> {
-  const response = await axios.post<{ response: string }>(
-    `${opts.baseUrl}/api/generate`,
-    { model: opts.model, prompt, stream: false },
-    { timeout: 120_000 },
-  );
-  return response.data.response.trim();
+  const res = await fetch(`${opts.baseUrl}/api/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: opts.model, prompt, stream: false }),
+    signal: AbortSignal.timeout(600_000),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Ollama request failed: ${res.status} ${res.statusText}`);
+  }
+
+  const data = (await res.json()) as { response: string };
+  return data.response.trim();
 }
 
 export class OllamaUnavailableError extends Error {
